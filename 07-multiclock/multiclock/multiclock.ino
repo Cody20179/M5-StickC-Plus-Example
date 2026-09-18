@@ -535,6 +535,53 @@ void pageInfo() {
   spr.pushSprite(0, 0);
 }
 
+/*
+ * Screenshot over the serial port.
+ *
+ * The LCD itself is write-only here, but every page is composed into a
+ * TFT_eSprite first - a real 240x135x16bpp framebuffer sitting in RAM - and
+ * that is readable. So the "screenshot" is just the sprite, streamed out one
+ * row at a time as base64 with a per-row checksum (this FTDI cable drops the
+ * occasional byte, and a silent drop would shear the whole image).
+ *
+ * 135 rows x 640 chars is about 8 s at 115200.
+ */
+const char B64[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+bool capturing = false;
+
+void dumpScreen() {
+  capturing = true;
+  const int rowBytes = SCR_W * 2;
+  uint8_t  row[SCR_W * 2];
+  char     out[SCR_W * 2 * 4 / 3 + 4];
+
+  Serial.printf("\nSSBEGIN %d %d 16 page%d\n", SCR_W, SCR_H, page + 1);
+  for (int y = 0; y < SCR_H; y++) {
+    uint32_t chk = 0;
+    for (int x = 0; x < SCR_W; x++) {
+      uint16_t c = spr.readPixel(x, y);
+      row[x * 2]     = c >> 8;
+      row[x * 2 + 1] = c & 0xFF;
+    }
+    for (int i = 0; i < rowBytes; i++) chk += row[i];
+
+    int n = 0, o = 0;
+    while (n < rowBytes) {                 // 480 is divisible by 3, no padding
+      uint32_t v = ((uint32_t)row[n] << 16) | ((uint32_t)row[n + 1] << 8) | row[n + 2];
+      out[o++] = B64[(v >> 18) & 63];
+      out[o++] = B64[(v >> 12) & 63];
+      out[o++] = B64[(v >> 6) & 63];
+      out[o++] = B64[v & 63];
+      n += 3;
+    }
+    out[o] = 0;
+    Serial.printf("R %03d %s %04X\n", y, out, (uint16_t)(chk & 0xFFFF));
+    delay(2);                              // give the UART room to drain
+  }
+  Serial.println("SSEND");
+  capturing = false;
+}
+
 void drawPage() {
   switch (page) {
     case 0: pageClock(); break;
@@ -614,7 +661,7 @@ void setup() {
 
   Serial.println("\n=== M5StickC Plus multi page instrument ===");
   Serial.println("# BtnA next page, BtnB page action, hold BtnB brightness");
-  Serial.println("# serial: n=next 1..5=jump b=brightness r=reset s=status");
+  Serial.println("# serial: n=next 1..5=jump b=brightness r=reset s=status C=screenshot");
   statusReport();
 
   drawPage();
@@ -639,6 +686,7 @@ void loop() {
         break;
       case 'r': pageAction();   break;
       case 's': statusReport(); break;
+      case 'C': dumpScreen();   break;
       default: break;
     }
   }
@@ -665,7 +713,7 @@ void loop() {
   // the FFT only runs while its page is showing - no point burning CPU on it
   if (page == 3) sampleSpectrum();
 
-  if (now - lastDrawMs >= 100) { lastDrawMs = now; drawPage(); }
+  if (!capturing && now - lastDrawMs >= 100) { lastDrawMs = now; drawPage(); }
 
   if (now - lastSerialMs >= 5000) {
     lastSerialMs = now;

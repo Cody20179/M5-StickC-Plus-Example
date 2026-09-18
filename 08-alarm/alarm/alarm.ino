@@ -17,6 +17,7 @@
  */
 #include <M5StickCPlus.h>
 #include <Preferences.h>
+#include <ESP_I2S.h>
 
 #define SCR_W 240
 #define SCR_H 135
@@ -40,6 +41,7 @@ TFT_eSprite spr = TFT_eSprite(&M5.Lcd);
 Preferences prefs;
 
 uint8_t intervalMin = 5;       // 每幾分鐘響一次
+uint32_t ringFreq  = 4000;     // 蜂鳴器頻率，用 w 掃頻量出最佳值
 bool    alarmOn     = true;
 
 // 同一分鐘只響一次。用「日期 + 當天第幾分鐘」當鍵值，
@@ -80,6 +82,7 @@ long minuteKey() {
 void loadSettings() {
   prefs.begin("alarm", true);
   intervalMin = prefs.getUChar("iv", 5);
+  ringFreq    = prefs.getUInt("f", 4000);
   alarmOn     = prefs.getBool("on", true);
   prefs.end();
   if (intervalMin < 1 || intervalMin > 60) intervalMin = 5;
@@ -88,6 +91,7 @@ void loadSettings() {
 void saveSettings() {
   prefs.begin("alarm", false);
   prefs.putUChar("iv", intervalMin);
+  prefs.putUInt("f", ringFreq);
   prefs.putBool("on", alarmOn);
   prefs.end();
 }
@@ -104,6 +108,117 @@ void buzzerOff() {
   ledcDetach(PIN_BUZZER);
   pinMode(PIN_BUZZER, OUTPUT);
   digitalWrite(PIN_BUZZER, LOW);   // 閒置拉低，不要浮接
+}
+
+// ---------------------------------------------------- buzzer sweep
+
+/*
+ * Which frequency is actually loudest?
+ *
+ * A passive buzzer has a mechanical resonance, and 4 kHz was a guess. The
+ * board has a microphone sitting a couple of centimetres from the buzzer, so
+ * it can measure its own output: play each frequency, record the mic RMS,
+ * print the curve. No external meter needed.
+ *
+ * Drive voltage (3.3 V from the GPIO) and duty cycle (ledcWriteTone is 50 %,
+ * which maximises the RMS of a square wave) are already at their limits, so
+ * frequency is the only free variable left.
+ */
+#define PIN_MIC_CLK  0
+#define PIN_MIC_DATA 34
+I2SClass i2s;
+bool micOk = false;
+int16_t micBuf[512];
+
+void initMic() {
+  i2s.setPinsPdmRx(PIN_MIC_CLK, PIN_MIC_DATA);
+  micOk = i2s.begin(I2S_MODE_PDM_RX, 32000,
+                    I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+}
+
+float micRms() {
+  if (!micOk) return 0;
+  size_t got = i2s.readBytes((char *)micBuf, sizeof(micBuf));
+  size_t n = got / sizeof(int16_t);
+  if (n == 0) return 0;
+  double sum = 0;
+  for (size_t i = 0; i < n; i++) sum += micBuf[i];
+  double mean = sum / n;
+  double sq = 0;
+  int clipped = 0;
+  for (size_t i = 0; i < n; i++) {
+    double d = micBuf[i] - mean;
+    sq += d * d;
+    if (micBuf[i] > 32000 || micBuf[i] < -32000) clipped++;
+  }
+  if (clipped > 2) Serial.print("!");     // mic saturating: reading is a floor
+  return sqrt(sq / n);
+}
+
+void sweepBuzzer() {
+  if (!micOk) { Serial.println("# mic not available"); return; }
+
+  buzzerOff();
+  delay(150);
+  micRms();
+  float floorRms = micRms();              // room noise, for reference
+  float atCurrent = 0;
+
+  float bestRms = 0;
+  uint32_t bestFreq = 0;
+
+  // coarse pass, then a fine pass around whatever won - the resonance is
+  // sharp enough that a 250 Hz grid can sit right next to the peak and miss it
+  for (uint8_t pass = 0; pass < 2; pass++) {
+    uint32_t lo, hi, step;
+    if (pass == 0) {
+      lo = 1000; hi = 6000; step = 250;
+      Serial.println("");
+      Serial.println("# coarse sweep 1000-6000 Hz, measured on the onboard mic");
+    } else {
+      lo = (bestFreq > 400) ? bestFreq - 400 : 200;
+      hi = bestFreq + 400;
+      step = 50;
+      Serial.println("");
+      Serial.print("# fine sweep around ");
+      Serial.print(bestFreq);
+      Serial.println(" Hz");
+    }
+    Serial.println("#  freq   rms");
+
+    for (uint32_t f = lo; f <= hi; f += step) {
+      buzzerOn(f);
+      delay(120);                         // let the element settle
+      micRms();                           // drop the block spanning the onset
+      float r = micRms();
+      buzzerOff();
+      delay(80);
+
+      if (r > bestRms) { bestRms = r; bestFreq = f; }
+      if (f == ringFreq) atCurrent = r;
+
+      int bars = (int)(r / 400);
+      if (bars > 46) bars = 46;
+      Serial.printf("# %5lu  %5.0f  ", f, r);
+      for (int i = 0; i < bars; i++) Serial.print("#");
+      Serial.println("");
+    }
+  }
+
+  Serial.println("");
+  Serial.printf("# quiet floor %.0f\n", floorRms);
+  Serial.printf("# loudest     %lu Hz  rms %.0f\n",
+                (unsigned long)bestFreq, bestRms);
+  if (atCurrent > 1) {
+    Serial.printf("# previous    %lu Hz  rms %.0f  -> %+.1f dB\n",
+                  (unsigned long)ringFreq, atCurrent,
+                  20.0 * log10(bestRms / atCurrent));
+  }
+
+  ringFreq = bestFreq;
+  saveSettings();
+  Serial.printf("# ring frequency set to %lu Hz and saved\n",
+                (unsigned long)ringFreq);
 }
 
 void ringStart() {
@@ -128,7 +243,7 @@ void ringTick() {
   if (ringStep >= RING_BEEPS * 2) { ringStop(); return; }
 
   if ((ringStep % 2) == 0) {
-    buzzerOn(4000);                // 4 kHz 接近這顆被動蜂鳴器的共振點，最大聲
+    buzzerOn(ringFreq);
     digitalWrite(PIN_LED, LOW);    // 亮
     ringNextMs = now + 150;
   } else {
@@ -240,6 +355,17 @@ void setIntervalFromSerial() {
   lastFiredKey = -1;
   saveSettings();
   Serial.printf("# interval = every %d min\n", intervalMin);
+}
+
+void setFreqFromSerial() {
+  char buf[8];
+  uint8_t n = readDigits(buf, 5, 800);
+  if (n == 0) { Serial.println("# F needs a frequency, e.g. F4000"); return; }
+  long v = atol(buf);
+  if (v < 200 || v > 10000) { Serial.printf("# F rejected: %ld (200-10000)\n", v); return; }
+  ringFreq = (uint32_t)v;
+  saveSettings();
+  Serial.printf("# ring frequency = %lu Hz\n", (unsigned long)ringFreq);
 }
 
 void statusReport() {
@@ -355,6 +481,7 @@ void setup() {
   digitalWrite(PIN_BUZZER, LOW);
 
   loadSettings();
+  initMic();
 
   // 開機當下若正好落在該響的那一分鐘，不要立刻響
   RTC_TimeTypeDef t;
@@ -362,7 +489,7 @@ void setup() {
   if (t.Minutes % intervalMin == 0) lastFiredKey = minuteKey();
 
   Serial.println("\n=== M5StickC Plus interval alarm ===");
-  Serial.println("# s=status t=test e=on/off I5=every 5 min T...=set clock");
+  Serial.println("# s=status t=test e=on/off I5=interval w=sweep F4000=freq T...=clock");
   statusReport();
 
   render();
@@ -382,6 +509,8 @@ void loop() {
         Serial.printf("# alarm %s\n", alarmOn ? "ON" : "OFF");
         break;
       case 'I': setIntervalFromSerial(); break;
+      case 'w': sweepBuzzer();           break;
+      case 'F': setFreqFromSerial();     break;
       case 'T': setRtcFromSerial();      break;
       default: break;
     }

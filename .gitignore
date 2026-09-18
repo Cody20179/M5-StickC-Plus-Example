@@ -1,0 +1,58 @@
+# ---- Arduino / arduino-cli 編譯產物 ----
+# --export-binaries 會產生 build/，裡面的 .elf 和 .map 動輒 10MB+，
+# 而且完全可以由原始碼重建，不該進版控。
+build/
+*.elf
+*.map
+*.bin
+*.hex
+*.eep
+*.d
+*.o
+*.a
+sdkconfig
+partitions.csv
+flash_args
+build.options.json
+
+# ---- 裝置私密資料 ----
+# WiFi SSID / 密碼、API 金鑰、MQTT 帳密請放這裡，不要寫死在 .ino 裡
+secrets.h
+secrets.ino
+credentials.h
+config_local.h
+wifi_config.h
+*.key
+*.pem
+*.crt
+.env
+.env.*
+
+# ---- 從裝置倒出來的資料 ----
+# 電池記錄、序列埠擷取、flash 備份可能含有使用環境資訊
+*.csv
+*.log
+flash_backup*.bin
+dump_*.txt
+serial_capture*.txt
+
+# ---- 編輯器 / 作業系統 ----
+.vscode/
+.idea/
+*.swp
+*~
+Thumbs.db
+desktop.ini
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store
+
+# ---- Python (esptool 等工具的虛擬環境) ----
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# ---- 本機工具二進位檔 ----
+tools/arduino-cli.exe
+tools/*.zip

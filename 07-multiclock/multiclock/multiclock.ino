@@ -150,21 +150,35 @@ void seedRtcFromBuildTime() {
  * with its own BM8563 and its own backup supply, have no reason to agree with
  * each other at all. This command is the only thing that actually syncs them.
  */
-void setRtcFromSerial() {
-  char buf[16];
+// Terminate on peek(), not read(). A character that does not belong to this
+// argument must stay in the buffer - reading it to detect the end eats the
+// next command's first byte, and that command then vanishes without a trace.
+uint8_t readDigits(char *buf, uint8_t maxLen, uint32_t timeoutMs) {
   uint8_t n = 0;
   uint32_t t0 = millis();
-  while (n < 14 && millis() - t0 < 2000) {
+  while (n < maxLen && millis() - t0 < timeoutMs) {
     if (!Serial.available()) continue;
-    char c = Serial.read();
-    if (c >= '0' && c <= '9') buf[n++] = c;
-    else if (n > 0) break;            // separator after digits started: stop
+    int c = Serial.peek();
+    if (c >= '0' && c <= '9') {
+      buf[n++] = (char)Serial.read();
+    } else if (c == 13 || c == 10) {
+      Serial.read();                  // terminator, consume it
+      if (n > 0) break;
+    } else {
+      break;                          // someone else's command, leave it
+    }
   }
+  buf[n] = 0;
+  return n;
+}
+
+void setRtcFromSerial() {
+  char buf[16];
+  uint8_t n = readDigits(buf, 14, 2000);
   if (n != 14) {
     Serial.println("# T needs YYYYMMDDHHMMSS, e.g. T20260918212018");
     return;
   }
-  buf[14] = '\0';
 
   auto num = [&](uint8_t off, uint8_t len) {
     int v = 0;

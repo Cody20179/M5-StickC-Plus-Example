@@ -174,6 +174,7 @@ arduino-cli upload  -p COM3 \
 
 | 檔案 | 用途 |
 |---|---|
+| `flash.ps1` | **互動式燒錄工具**（見下）|
 | `verify.ps1` | reset 後監看 12 秒 |
 | `serial_monitor.ps1` | reset 後監看 60 秒，每行加時間戳 |
 | `serial_id.ps1` | 掃描多種鮑率，自動找出正確的那個 |
@@ -184,7 +185,30 @@ arduino-cli upload  -p COM3 \
 | `pages.ps1` | 多頁面韌體的翻頁驗證 |
 | `screenshot.py` | **把螢幕畫面擷取成 PNG** |
 
-PowerShell 腳本內的 COM 埠寫死為 `COM3`，請依實機修改（`screenshot.py` 用 `--port`）。
+`flash.ps1` 會自己找埠；其餘 PowerShell 腳本內的 COM 埠寫死為 `COM3`，
+請依實機修改（`screenshot.py` 用 `--port`）。
+
+### 燒錄工具 `flash.ps1`
+
+選一個範例或自己的 `.ino`，選 COM 埠，編譯並燒進去。
+
+```powershell
+.\tools\flash.ps1                               # 全互動，列出範例和埠讓你挑
+.\tools\flash.ps1 -List                         # 只看有哪些範例和埠
+.\tools\flash.ps1 -Sketch 7 -Port COM3          # 直接燒第 7 個範例
+.\tools\flash.ps1 -Sketch multiclock            # 用名稱指定
+.\tools\flash.ps1 -Sketch C:\my\blink.ino       # 燒自己的檔案
+.\tools\flash.ps1 -Sketch 2 -Monitor            # 燒完直接開序列埠監看
+.\tools\flash.ps1 -Sketch 3 -CompileOnly        # 只編譯不燒錄
+```
+
+它會處理幾件容易卡住的事：
+
+- **找不到 arduino-cli 就自動下載**到 `tools/`（不需要先裝環境）
+- **列出 COM 埠時一併顯示裝置名稱**，才分得出哪個是板子；只有一個埠時自動採用
+- **上傳速率固定 115200**（`-Baud` 可改）—— 這塊板子的 FTDI 線在更高速率會斷線
+- **`.ino` 主檔名與資料夾名不符時自動處理**：Arduino 規定兩者必須相同，
+  不符的話會複製到暫存 sketch 目錄再編譯，而不是直接報一個看不懂的錯
 
 ### 螢幕擷取
 

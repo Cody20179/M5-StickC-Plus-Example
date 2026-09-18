@@ -72,8 +72,19 @@ float levelZeroPitch = 0, levelZeroRoll = 0;
 I2SClass i2s;
 bool micOk = false;
 
-const uint16_t FFT_N       = 512;
-const float    SAMPLE_RATE = 16000.0f;
+/*
+ * 32 kHz, not 16 kHz.
+ *
+ * The SPM1423 responds from 100 Hz to 10 kHz. Sampling at 16 kHz puts Nyquist
+ * at 8 kHz and the top octave band at 2.8-5.7 kHz, which throws away the whole
+ * upper half of what the microphone can actually hear. 32 kHz moves Nyquist to
+ * 16 kHz and buys the 8 kHz band, covering the part's full range.
+ *
+ * PDM clock = rate x 64 = 2.048 MHz, inside the part's 1.0-3.25 MHz window.
+ * FFT_N goes to 1024 so the bin stays at 31.25 Hz instead of coarsening to 62.5.
+ */
+const uint16_t FFT_N       = 1024;
+const float    SAMPLE_RATE = 32000.0f;
 float vReal[FFT_N];
 float vImag[FFT_N];
 int16_t micRaw[FFT_N];
@@ -81,11 +92,12 @@ ArduinoFFT<float> FFT(vReal, vImag, FFT_N, SAMPLE_RATE);
 
 // Octave bands. Showing every FFT bin on a 240 px screen is noise; the ear
 // works in ratios, so one bar per octave is both readable and honest.
-const uint8_t BAND_COUNT = 8;
+const uint8_t BAND_COUNT = 9;
 const float BAND_EDGE[BAND_COUNT + 1] = {
-  22, 44, 88, 177, 354, 707, 1414, 2828, 5657   // sqrt(2) around 31..4000 Hz
+  22, 44, 88, 177, 354, 707, 1414, 2828, 5657, 11314   // sqrt(2) around 31..8000
 };
-const char *BAND_LABEL[BAND_COUNT] = {"31", "63", "125", "250", "500", "1k", "2k", "4k"};
+const char *BAND_LABEL[BAND_COUNT] =
+  {"31", "63", "125", "250", "500", "1k", "2k", "4k", "8k"};
 float bandDb[BAND_COUNT]     = {0};
 float bandPeakDb[BAND_COUNT] = {0};
 float micDbfs = -90.0f, micPeakDbfs = -90.0f;
@@ -349,13 +361,12 @@ void pageEnv() {
   spr.setTextColor(C_PEAK, C_BG);
   spr.drawString("pk " + String((int)(vibPeakMg + 0.5f)), 118, 82);
 
-  // cumulative exposure - the number that actually matters if you are
-  // watching a machine rather than glancing at an instant reading
-  uint32_t mins = (millis() - vibDoseStartMs) / 60000;
+  // Cumulative exposure - the number that matters when watching a machine
+  // rather than glancing at an instant reading. Kept short so it cannot run
+  // back into the "pk" text; the elapsed time moved to the footer.
   spr.setTextColor(C_DIM, C_BG);
   spr.setTextDatum(TR_DATUM);
-  spr.drawString("sum " + String((uint32_t)(vibDose / 1000.0)) + "k mg-s / " +
-                 String(mins) + "min", 236, 82);
+  spr.drawString(String((uint32_t)(vibDose / 1000.0)) + "k mg-s", 236, 82);
   spr.setTextDatum(TL_DATUM);
 
   bar(4, 96, SCR_W - 8, 14, vibBarMg, VIB_FULLSCALE_MG, C_ACC);
@@ -363,7 +374,8 @@ void pageEnv() {
   if (pk > SCR_W - 6) pk = SCR_W - 6;
   spr.drawFastVLine(pk, 98, 10, C_PEAK);
 
-  footer("BtnA next   BtnB reset vib");
+  uint32_t mins = (millis() - vibDoseStartMs) / 60000;
+  footer((String("BtnA next   BtnB reset vib   ") + mins + "min").c_str());
   spr.pushSprite(0, 0);
 }
 
@@ -457,40 +469,51 @@ void pageSound() {
 
   spr.setTextDatum(TR_DATUM);
   spr.setTextColor(C_PEAK, C_BG);
-  spr.drawString("pk " + String(micPeakDbfs, 0), 236, 28);
+  spr.drawString("pk " + String(micPeakDbfs, 0), 236, 26);
   spr.setTextColor(C_TEXT, C_BG);
-  spr.drawString(String((int)domFreq) + " Hz", 236, 40);
+  spr.drawString(String((int)domFreq) + " Hz", 236, 36);
   spr.setTextDatum(TL_DATUM);
 
-  // octave bars. -80..-10 dB maps to the full height.
-  const int top = 54, bot = 118, h = bot - top;
+  // acquisition settings, so the axis can be trusted at a glance
+  spr.setTextColor(C_LABEL, C_BG);
+  char acq[40];
+  snprintf(acq, sizeof(acq), "%d/S  N=%d  bin %dHz  B:pk",
+           (int)SAMPLE_RATE, FFT_N, (int)(SAMPLE_RATE / FFT_N));
+  spr.drawString(acq, 4, 46);
+
+  /*
+   * Bar scaling.
+   *
+   * bandDb is 20*log10(mean FFT magnitude) in raw int16 counts, NOT dBFS.
+   * A quiet room measures 39-60 dB here and a full-scale tone lands near 132,
+   * so the old (db+20)/70 mapping pinned every bar at full height the moment
+   * the firmware booted. 40..110 dB across the bar is the usable window.
+   */
+  const float DB_FLOOR = 40.0f, DB_SPAN = 70.0f;
+  const int top = 60, bot = 120, h = bot - top;
   const int bw = (SCR_W - 8) / BAND_COUNT;
   spr.drawFastHLine(4, bot, SCR_W - 8, C_DIM);
 
   for (uint8_t b = 0; b < BAND_COUNT; b++) {
     int x = 4 + b * bw;
-    float norm = (bandDb[b] + 20.0f) / 70.0f;      // magnitude dB -> 0..1
+    float norm = (bandDb[b] - DB_FLOOR) / DB_SPAN;
     if (norm < 0) norm = 0;
     if (norm > 1) norm = 1;
     int bh = (int)(h * norm);
     uint16_t col = norm > 0.8f ? C_BAD : (norm > 0.55f ? C_WARN : C_ACC);
     if (bh > 0) spr.fillRect(x + 1, bot - bh, bw - 3, bh, col);
 
-    float pn = (bandPeakDb[b] + 20.0f) / 70.0f;
+    float pn = (bandPeakDb[b] - DB_FLOOR) / DB_SPAN;
     if (pn < 0) pn = 0;
     if (pn > 1) pn = 1;
-    int py = bot - (int)(h * pn);
-    spr.drawFastHLine(x + 1, py, bw - 3, C_PEAK);
+    if (pn > 0) spr.drawFastHLine(x + 1, bot - (int)(h * pn), bw - 3, C_PEAK);
 
     spr.setTextColor(C_DIM, C_BG);
-    spr.drawString(BAND_LABEL[b], x + 2, bot + 3);
+    spr.drawString(BAND_LABEL[b], x + 2, bot + 4);
   }
 
-  footer("");
-  spr.setTextDatum(BR_DATUM);
-  spr.setTextColor(C_DIM, C_BG);
-  spr.drawString("BtnB reset pk", 236, SCR_H - 1);
-  spr.setTextDatum(TL_DATUM);
+  // no footer() on this page - the band labels own the bottom strip, and the
+  // BtnB hint lives on the acquisition line instead
   spr.pushSprite(0, 0);
 }
 
@@ -604,7 +627,7 @@ void pageAction() {
       break;
     case 3:
       micPeakDbfs = -90;
-      for (uint8_t b = 0; b < BAND_COUNT; b++) bandPeakDb[b] = -20;
+      for (uint8_t b = 0; b < BAND_COUNT; b++) bandPeakDb[b] = 40;
       Serial.println("# spectrum peaks reset");
       break;
     default: break;
@@ -631,6 +654,9 @@ void statusReport() {
   Serial.printf("#   tilt   pitch %.1f  roll %.1f\n", pitchDeg, rollDeg);
   Serial.printf("#   mic    %s  %.1f dBFS  peak freq %.0f Hz\n",
                 micOk ? "ok" : "FAILED", micDbfs, domFreq);
+  Serial.printf("#   acq    %d/S  N=%d  bin %.1f Hz  nyquist %d Hz\n",
+                (int)SAMPLE_RATE, FFT_N, SAMPLE_RATE / FFT_N,
+                (int)(SAMPLE_RATE / 2));
   if (micOk) {
     Serial.print("#   bands ");
     for (uint8_t b = 0; b < BAND_COUNT; b++)
@@ -657,7 +683,7 @@ void setup() {
   gravityBaseline = sqrtf(accX * accX + accY * accY + accZ * accZ);
   vibWindowStart = millis();
   vibDoseStartMs = millis();
-  for (uint8_t b = 0; b < BAND_COUNT; b++) { bandDb[b] = -20; bandPeakDb[b] = -20; }
+  for (uint8_t b = 0; b < BAND_COUNT; b++) { bandDb[b] = 40; bandPeakDb[b] = 40; }
 
   Serial.println("\n=== M5StickC Plus multi page instrument ===");
   Serial.println("# BtnA next page, BtnB page action, hold BtnB brightness");

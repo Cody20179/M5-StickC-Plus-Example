@@ -54,5 +54,8 @@ venv/
 .venv/
 
 # ---- 本機工具二進位檔 ----
+# flash.ps1 找不到 arduino-cli 時會自動下載到這裡，解壓出來的
+# arduino-cli.exe 和 LICENSE.txt 都不該進版控
 tools/arduino-cli.exe
+tools/LICENSE.txt
 tools/*.zip

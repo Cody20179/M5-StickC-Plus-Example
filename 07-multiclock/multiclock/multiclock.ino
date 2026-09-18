@@ -140,6 +140,77 @@ void seedRtcFromBuildTime() {
   M5.Rtc.SetTime(&nt);
 }
 
+/*
+ * Set the RTC from the host: "T" followed by YYYYMMDDHHMMSS.
+ *
+ * seedRtcFromBuildTime() deliberately refuses to touch a clock that already
+ * holds a plausible year, otherwise every flash would reset the time to
+ * whenever the sketch happened to be compiled. The cost of that rule is that a
+ * clock which has drifted is never corrected on its own - and two boards, each
+ * with its own BM8563 and its own backup supply, have no reason to agree with
+ * each other at all. This command is the only thing that actually syncs them.
+ */
+void setRtcFromSerial() {
+  char buf[16];
+  uint8_t n = 0;
+  uint32_t t0 = millis();
+  while (n < 14 && millis() - t0 < 2000) {
+    if (!Serial.available()) continue;
+    char c = Serial.read();
+    if (c >= '0' && c <= '9') buf[n++] = c;
+    else if (n > 0) break;            // separator after digits started: stop
+  }
+  if (n != 14) {
+    Serial.println("# T needs YYYYMMDDHHMMSS, e.g. T20260918212018");
+    return;
+  }
+  buf[14] = '\0';
+
+  auto num = [&](uint8_t off, uint8_t len) {
+    int v = 0;
+    for (uint8_t i = 0; i < len; i++) v = v * 10 + (buf[off + i] - '0');
+    return v;
+  };
+  int yy = num(0, 4), mo = num(4, 2), dd = num(6, 2);
+  int hh = num(8, 2), mi = num(10, 2), ss = num(12, 2);
+
+  if (yy < 2024 || yy > 2099 || mo < 1 || mo > 12 || dd < 1 || dd > 31 ||
+      hh > 23 || mi > 59 || ss > 59) {
+    Serial.printf("# T rejected: %04d-%02d-%02d %02d:%02d:%02d out of range\n",
+                  yy, mo, dd, hh, mi, ss);
+    return;
+  }
+
+  RTC_TimeTypeDef told; RTC_DateTypeDef dold;
+  M5.Rtc.GetTime(&told); M5.Rtc.GetDate(&dold);
+
+  RTC_DateTypeDef nd;
+  nd.WeekDay = weekdayOf(yy, mo, dd);
+  nd.Month = mo; nd.Date = dd; nd.Year = yy;
+  RTC_TimeTypeDef nt;
+  nt.Hours = hh; nt.Minutes = mi; nt.Seconds = ss;
+  M5.Rtc.SetDate(&nd);
+  M5.Rtc.SetTime(&nt);
+
+  // report the correction, so drift between boards is measurable
+  long before = (long)told.Hours * 3600 + told.Minutes * 60 + told.Seconds;
+  long after  = (long)hh * 3600 + mi * 60 + ss;
+  long diff   = after - before;
+  if (dold.Year == yy && dold.Month == mo && dold.Date == dd) {
+    Serial.printf("# RTC was  %04d-%02d-%02d %02d:%02d:%02d\n",
+                  dold.Year, dold.Month, dold.Date,
+                  told.Hours, told.Minutes, told.Seconds);
+    Serial.printf("# RTC now  %04d-%02d-%02d %02d:%02d:%02d %s  (%+ld s)\n",
+                  yy, mo, dd, hh, mi, ss, WDAY[nd.WeekDay], diff);
+  } else {
+    Serial.printf("# RTC was  %04d-%02d-%02d %02d:%02d:%02d\n",
+                  dold.Year, dold.Month, dold.Date,
+                  told.Hours, told.Minutes, told.Seconds);
+    Serial.printf("# RTC now  %04d-%02d-%02d %02d:%02d:%02d %s\n",
+                  yy, mo, dd, hh, mi, ss, WDAY[nd.WeekDay]);
+  }
+}
+
 void sampleImu() {
   M5.Imu.getAccelData(&accX, &accY, &accZ);
   M5.Imu.getGyroData(&gyrX, &gyrY, &gyrZ);
@@ -687,7 +758,7 @@ void setup() {
 
   Serial.println("\n=== M5StickC Plus multi page instrument ===");
   Serial.println("# BtnA next page, BtnB page action, hold BtnB brightness");
-  Serial.println("# serial: n=next 1..5=jump b=brightness r=reset s=status C=screenshot");
+  Serial.println("# serial: n=next 1..5=jump b=brightness r=reset s=status C=screenshot T=set clock");
   statusReport();
 
   drawPage();
@@ -713,6 +784,7 @@ void loop() {
       case 'r': pageAction();   break;
       case 's': statusReport(); break;
       case 'C': dumpScreen();   break;
+      case 'T': setRtcFromSerial(); break;
       default: break;
     }
   }

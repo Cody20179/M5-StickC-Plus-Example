@@ -16,7 +16,19 @@
 | 4 SOUND | dBFS 音量表、主頻率、9 段八度頻譜 |
 | 5 INFO | 系統資訊 |
 
-Serial：`n` 翻頁 · `1`~`5` 跳頁 · `b` 亮度 · `r` 歸零 · `s` 狀態 · **`C` 螢幕擷取**
+Serial：`n` 翻頁 · `1`~`5` 跳頁 · `b` 亮度 · `r` 歸零 · `s` 狀態 ·
+**`C` 螢幕擷取** · **`T` 對時**
+
+## 對時
+
+`T` 後面接 `YYYYMMDDHHMMSS`，例如 `T20260918212018`。
+會印出修改前後的時間與差值，方便量測兩塊板子的漂移。
+
+實務上用 [`../tools/settime.ps1`](../tools/settime.ps1) 就好，它會自動帶入電腦時間。
+
+韌體開機時的 `seedRtcFromBuildTime()` **只在年份不合理時才設定 RTC** ——
+否則每次燒錄都會把時鐘覆蓋成編譯時間。代價是時間偏掉後不會自己修正，
+所以對時只能靠這個指令。
 
 ```bash
 arduino-cli compile --fqbn m5stack:esp32:m5stack_stickc_plus multiclock
